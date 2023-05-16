@@ -1,0 +1,81 @@
+MODULE move(row, col)
+DEFINE
+	idx := (row - 1) * 3 + (col - 1); -- 0-based index into grid
+	
+MODULE main
+VAR
+	-- unconstrained input
+	row : {1, 2, 3};
+	col : {1, 2, 3};
+	move: move(row, col); -- pass by reference
+
+	-- starts with X and flips back and forth
+	turn : {_X, _O};
+
+	-- # of placed marks
+	nmoves : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+
+	grid : array 0 .. 8 of {Empty, _X, _O};
+	state : {Open, XWon, OWon, Draw};
+DEFINE
+	EMPTY_GRID := [Empty, Empty, Empty, Empty, Empty, Empty, Empty, Empty, Empty];
+	valid_move := nmoves < 9 & grid[move.idx] = Empty;
+ASSIGN
+	init(grid) := EMPTY_GRID;
+	-- cannot have complex expression in array subscript on left-hand side
+	next(grid[0]) := (valid_move & move.idx = 0) ? turn : grid[0];
+	next(grid[1]) := (valid_move & move.idx = 1) ? turn : grid[1];
+	next(grid[2]) := (valid_move & move.idx = 2) ? turn : grid[2];
+	next(grid[3]) := (valid_move & move.idx = 3) ? turn : grid[3];
+	next(grid[4]) := (valid_move & move.idx = 4) ? turn : grid[4];
+	next(grid[5]) := (valid_move & move.idx = 5) ? turn : grid[5];
+	next(grid[6]) := (valid_move & move.idx = 6) ? turn : grid[6];
+	next(grid[7]) := (valid_move & move.idx = 7) ? turn : grid[7];
+	next(grid[8]) := (valid_move & move.idx = 8) ? turn : grid[8];
+
+	init(turn) := _X;
+	next(turn) :=
+		case
+			valid_move & turn = _X : _O;
+			valid_move & turn = _O : _X;
+			TRUE : turn;
+		esac;
+
+	init(nmoves) := 0;
+	next(nmoves) :=
+		case
+			valid_move : nmoves + 1;
+			TRUE : nmoves;
+		esac;
+
+	init(state) := Open;
+	next(state) :=
+		case
+				-- rows
+			  (grid[0] = _X & grid[1] = _X & grid[2] = _X)
+			| (grid[3] = _X & grid[4] = _X & grid[5] = _X)
+			| (grid[6] = _X & grid[7] = _X & grid[8] = _X)
+				-- columns
+			| (grid[0] = _X & grid[3] = _X & grid[6] = _X)
+			| (grid[1] = _X & grid[4] = _X & grid[7] = _X)
+			| (grid[2] = _X & grid[5] = _X & grid[8] = _X)
+				-- diagonals
+			| (grid[0] = _X & grid[4] = _X & grid[8] = _X)
+			| (grid[2] = _X & grid[4] = _X & grid[6] = _X) : XWon;
+
+				-- rows
+			  (grid[0] = _O & grid[1] = _O & grid[2] = _O)
+			| (grid[3] = _O & grid[4] = _O & grid[5] = _O)
+			| (grid[6] = _O & grid[7] = _O & grid[8] = _O)
+				-- columns
+			| (grid[0] = _O & grid[3] = _O & grid[6] = _O)
+			| (grid[1] = _O & grid[4] = _O & grid[7] = _O)
+			| (grid[2] = _O & grid[5] = _O & grid[8] = _O)
+				-- diagonals
+			| (grid[0] = _O & grid[4] = _O & grid[8] = _O)
+			| (grid[2] = _O & grid[4] = _O & grid[6] = _O) : OWon;
+
+			nmoves = 9 : Draw;
+			TRUE : state;
+		esac;
+
