@@ -1,0 +1,26 @@
+MODULE main
+VAR
+	y   : 0 .. 2;
+	pg1 : process pg(y);
+	pg2 : process pg(y);
+ASSIGN
+	init(y) := 1;
+
+
+
+MODULE pg(y)
+VAR
+	state : { noncrit, wait, crit };
+ASSIGN
+	init(state) := noncrit;
+	next(state) := case
+			(state = noncrit)             : wait;
+			(state = wait) & (y>0)        : crit;
+			(state = crit)                : noncrit;
+			TRUE                          : state;
+		esac;
+	next(y) := case
+			(state = wait) & (y>0)        : y - 1;
+			(state = crit) & (y<2)        : y + 1;
+			TRUE                          : y;
+		esac;

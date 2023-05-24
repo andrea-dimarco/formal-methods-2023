@@ -1,0 +1,47 @@
+MODULE main
+VAR
+	x   : 1 .. 2;
+	pg1 : peterson(1, x, pg2.b);
+	pg2 : peterson(2, x, pg1.b);
+
+
+JUSTICE
+	pg1.state = crit
+JUSTICE
+	pg2.state = crit
+
+
+LTLSPEC G !(pg1.state = crit & pg2.state = crit)
+LTLSPEC G (F (pg1.state = crit)) & G ( F (pg2.state = crit))
+LTLSPEC G (pg1.state=crit -> O (pg1.state=wait)) & G (pg2.state=crit -> O (pg2.state=wait))
+
+
+MODULE peterson(id, x, other_b)
+VAR
+	state : { noncrit, wait, crit };
+INIT
+	state = noncrit;
+TRANS 
+	( (state = noncrit 
+		& id = 1) -> 
+			(next(state) = noncrit | (next(state) = wait & next(x) = 2)) )
+
+	& ( (state = noncrit 
+		& id = 2) -> 
+			(next(state) = noncrit | (next(state) = wait & next(x) = 1)) )
+
+	& ( ((state = wait & (id=x | !other_b))
+		 ) ->
+			(next(state) = wait | next(state) = crit) )
+
+	& ( (state = crit
+		 ) ->
+			(next(state) = crit | next(state) = noncrit) )
+
+	& ( ( !(state = noncrit) 
+		& !((state = wait & (id=x | !other_b))) 
+		& !(state = crit) ) ->
+			(next(state) = state & next(x) = x) );
+
+DEFINE
+	b := (state = wait) | (state = crit);
