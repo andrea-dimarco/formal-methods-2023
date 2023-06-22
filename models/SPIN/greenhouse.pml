@@ -10,16 +10,16 @@ ltl exp  { [] !(has_expired) } // the system harvests at most LIMIT_EXPIRED expi
 ltl temp { [] temp_in_bounds } // the average temperature never gets below FREEZING_TEMP or above BURNING_TEMP
 ltl rate { [] rate_expired }   // the system keeps a rate of 1 (or less) expired plant every RATE_EXPIRED mature plants harvested
 
-ltl timed_exp  { [] !(timed_expired) } // same as 'exp' but only for the first TIME_LIMIT time steps
-ltl timed_temp { [] timed_temp }       // same as 'temp' but only for the first TIME_LIMIT time steps
-ltl timed_rate { [] timed_rate }       // same as 'rate' but only for the first TIME_LIMIT time steps
+ltl t_exp  { [] !(timed_expired) } // same as 'exp' but only for the first TIME_LIMIT time steps
+ltl t_temp { [] timed_temp }       // same as 'temp' but only for the first TIME_LIMIT time steps
+ltl t_rate { [] timed_rate }       // same as 'rate' but only for the first TIME_LIMIT time steps
 
 
 /* MACROS */
 
-#define N_PLANT_BEDS 3    // number of plant beds
-#define N_HARVESTERS 1    // number of harvester robots
-#define N_SEEDERS 1       // number of robots that plant seeds
+#define N_PLANT_BEDS  50    // number of plant beds
+#define N_HARVESTERS  20    // number of harvester robots
+#define N_SEEDERS     10    // number of robots that plant seeds
 
 #define RANDOM_START false // starting age for plant beds is randomized between [AGE_NO_PLANT, AGE_MATURE]
 
@@ -29,8 +29,8 @@ ltl timed_rate { [] timed_rate }       // same as 'rate' but only for the first 
 #define HOT_PREEMPTIVE  1  // the heater will be turned OFF when ...
 
 #define LIMIT_EXPIRED 0   // How many expired plants the system tolerates
-#define RATE_EXPIRED 10   // Tolerates 1 expired plant every RATE_EXPIRED mature harvested plants
-#define TIME_LIMIT   20   // For how many time steps the system has to satisfy the properties
+#define RATE_EXPIRED 10   // Tolerates 1 expired plant every 'RATE_EXPIRED' mature harvested plants
+#define TIME_LIMIT   50   // For how many time steps the system has to satisfy the properties
 
 // Monitor, heat manager, global weather, plants, harvesters, and seeders.
 #define N_PROCESSES (1 + 1 + 1 + N_PLANT_BEDS + N_HARVESTERS + N_SEEDERS)
@@ -56,7 +56,8 @@ ltl timed_rate { [] timed_rate }       // same as 'rate' but only for the first 
 #define WEATHER_MAX_RATE 0    // maximum temperature increase
 
 #define CHANNEL_LEN 1 // length of the FIFO channels
-#define MY_PLANTS_LEN ((N_PLANT_BEDS/N_SEEDERS)+(N_PLANT_BEDS%N_SEEDERS)) // upper-bound on how many plants can be assigned to a process
+#define HARVESTER_PLANTS_LEN ((N_PLANT_BEDS/N_HARVESTERS)+(N_PLANT_BEDS%N_HARVESTERS)) // upper-bound on how many plants can be assigned to a process
+#define SEEDER_PLANTS_LEN ((N_PLANT_BEDS/N_SEEDERS)+(N_PLANT_BEDS%N_SEEDERS)) // upper-bound on how many plants can be assigned to a process
 
 
 /* TYPES */
@@ -73,14 +74,13 @@ byte        plant_harvesters[N_PLANT_BEDS]; // which harvester can harvest which
 byte        plant_seeders[N_PLANT_BEDS];    // which seeder can seed which plant bed
 byte        n_mature_harvested = 0;     // number of mature plants harvested
 byte        n_expired_harvested = 0;    // number of expired plants
-byte        n_planted = 0;
 bool        has_expired = false;        // for the monitor
 bool        temp_in_bounds = true;      // for the monitor
 bool        rate_expired = true;        // for the monitor
-int         time_step = 0;              // for the monitor, updated by global_clock
+int         time_step = 0;              // updated by global_clock
 bool        timed_expired = false;
-bool        timed_temp = false;
-bool        timed_rate = false;
+bool        timed_temp = true;
+bool        timed_rate = true;
 
 /* CHANNELS */
 chan clock[N_PROCESSES] = [0] of { mtype };
@@ -126,6 +126,8 @@ inline get_growth_rate(rate)
 proctype monitor(byte my_id)
 {
 	assert(RATE_EXPIRED > 0);
+	assert(TIME_LIMIT > 0);
+	assert(LIMIT_EXPIRED >= 0);
 	do
 	:: atomic { 
 		clock[my_id] ? _;
@@ -148,7 +150,9 @@ proctype monitor(byte my_id)
 			-> rate_expired = true;
 		:: ((n_expired_harvested != 0) && (((n_mature_harvested+n_expired_harvested) / n_expired_harvested) >= RATE_EXPIRED))
 			-> rate_expired = true;
+			   printf("\n[MONITOR] Expired rate is 1 every (%d) mature\n", ((n_mature_harvested+n_expired_harvested) / n_expired_harvested));
 		:: else -> rate_expired = false;
+			   printf("\n[MONITOR] Expired rate is 1 every (%d) mature\n", ((n_mature_harvested+n_expired_harvested) / n_expired_harvested));
 		fi;
 		
 //check_timed_expired:
@@ -156,10 +160,12 @@ proctype monitor(byte my_id)
 		:: (time_step <= TIME_LIMIT) -> timed_expired = has_expired;
 		:: else                      -> timed_expired = false;
 		fi;
+		/*
 		if
 		:: (timed_expired) -> assert(false);
 		:: else -> skip;
 		fi;
+		*/
 
 //check_timed_temp:
 		if
@@ -305,7 +311,7 @@ proctype harvester(byte my_id)
 {
 	byte i;
 	byte j;
-	byte my_plants[MY_PLANTS_LEN];
+	byte my_plants[HARVESTER_PLANTS_LEN];
 	byte best_plant = 0;
 	byte highest_age = 0;
 
@@ -332,7 +338,7 @@ proctype harvester(byte my_id)
 		 *  at least 1 plant and 1 harvester, no plant will have id=255
 		 */
 		do
-		:: (j < MY_PLANTS_LEN) -> my_plants[j] = 255; j++;
+		:: (j < HARVESTER_PLANTS_LEN) -> my_plants[j] = 255; j++;
 		:: else -> break;
 		od;
 	}
@@ -346,7 +352,7 @@ proctype harvester(byte my_id)
 		 */
 		best_plant = 0; i = 0; highest_age = AGE_NO_PLANT;
 		do
-		:: ((i < MY_PLANTS_LEN) && (my_plants[i] != 255)) -> 
+		:: ((i < HARVESTER_PLANTS_LEN) && (my_plants[i] != 255)) -> 
 			if
 			:: (plant_sensors[my_plants[i]] > highest_age) -> 
 					best_plant = my_plants[i]; highest_age = plant_sensors[my_plants[i]];
@@ -381,7 +387,7 @@ proctype seeder(byte my_id)
 {
 	byte i;
 	byte j;
-	byte my_plants[MY_PLANTS_LEN];
+	byte my_plants[SEEDER_PLANTS_LEN];
 
 //get_my_plants:
 	/*
@@ -400,7 +406,7 @@ proctype seeder(byte my_id)
 		:: else -> break;
 		od;
 		do
-		:: (j < MY_PLANTS_LEN) -> my_plants[j] = 255; j++;
+		:: (j < SEEDER_PLANTS_LEN) -> my_plants[j] = 255; j++;
 		:: else                -> break;
 		od;
 	}
@@ -415,12 +421,11 @@ proctype seeder(byte my_id)
 		clock[my_id] ? _;
 		i = 0;
 		do
-		:: ((i < MY_PLANTS_LEN) && (my_plants[i] != 255)) -> 
+		:: ((i < SEEDER_PLANTS_LEN) && (my_plants[i] != 255)) -> 
 			if
 			:: ((plant_sensors[my_plants[i]] == AGE_NO_PLANT)
 				&& nfull(plant_action[my_plants[i]])) -> 
 					plant_action[my_plants[i]] ! SEED;
-					n_planted++;
 					break; // one seed per time slot!
 			:: (!(plant_sensors[my_plants[i]] == AGE_NO_PLANT)
 				|| full(plant_action[my_plants[i]])) -> skip;
