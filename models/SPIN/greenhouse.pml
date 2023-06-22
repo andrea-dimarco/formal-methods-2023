@@ -17,28 +17,29 @@ ltl timed_rate { [] timed_rate }       // same as 'rate' but only for the first 
 
 /* MACROS */
 
-#define N_PLANT_BEDS 5        // number of plant beds
-#define N_HARVESTERS 2    // number of harvester robots
-#define N_SEEDERS 2       // number of robots that plant seeds
+#define N_PLANT_BEDS 3    // number of plant beds
+#define N_HARVESTERS 1    // number of harvester robots
+#define N_SEEDERS 1       // number of robots that plant seeds
 
 #define RANDOM_START false // starting age for plant beds is randomized between [AGE_NO_PLANT, AGE_MATURE]
 
+#define TEMP_INCREASE 4   // Strength of the heater
+
 #define COLD_PREEMPTIVE 2 // the heater will be turned ON when temp is this close to safe limits
-#define HOT_PREEMPTIVE (TEMP_INCREASE)  // the heater will be turned OFF when ...
+#define HOT_PREEMPTIVE  1  // the heater will be turned OFF when ...
 
 #define LIMIT_EXPIRED 0   // How many expired plants the system tolerates
 #define RATE_EXPIRED 10   // Tolerates 1 expired plant every RATE_EXPIRED mature harvested plants
-#define TIME_LIMIT   50   // for how many steps we want the system to satisfy the properties
+#define TIME_LIMIT   20   // For how many time steps the system has to satisfy the properties
 
 // Monitor, heat manager, global weather, plants, harvesters, and seeders.
 #define N_PROCESSES (1 + 1 + 1 + N_PLANT_BEDS + N_HARVESTERS + N_SEEDERS)
 
 #define FREEZING_TEMP 0   // plant freezes to death
-#define MIN_SAFE_TEMP 5   // min temperature for the plants
-#define MAX_SAFE_TEMP 10  // max temperature for the plants
-#define BURNING_TEMP  15  // plant combust into flames
-#define START_TEMP ((MIN_SAFE_TEMP+MAX_SAFE_TEMP)/2 ) // starting greenhouse temperature
-#define TEMP_INCREASE 3   // when heater is ON
+#define MIN_SAFE_TEMP 10   // min temperature for the plants
+#define MAX_SAFE_TEMP 15  // max temperature for the plants
+#define BURNING_TEMP  25  // plant combust into flames
+#define START_TEMP ((FREEZING_TEMP+BURNING_TEMP)/2 ) // starting greenhouse temperature
 
 #define AGE_NO_PLANT 0    // when the plant bed has no plant
 #define AGE_PLANTED 1     // starting age for the plant
@@ -49,28 +50,25 @@ ltl timed_rate { [] timed_rate }       // same as 'rate' but only for the first 
 #define SAFE_RATE 1       // growth rate with safe temperatures
 #define HOT_RATE 2        // growth rate with hot temperatures
 
-#define WEATHER_MIN_LEN 3     // minimum number of time steps of a weather period
-#define WEATHER_MAX_LEN 5     // maximum number of time steps of a weather period
-#define WEATHER_MIN_RATE (-4) // maximum temperature decrease
+#define WEATHER_MIN_LEN 1     // minimum number of time steps of a weather period
+#define WEATHER_MAX_LEN 3     // maximum number of time steps of a weather period
+#define WEATHER_MIN_RATE (-5) // maximum temperature decrease
 #define WEATHER_MAX_RATE 0    // maximum temperature increase
 
-#define CHANNEL_LEN (N_HARVESTERS + N_SEEDERS) // length of the FIFO channels
+#define CHANNEL_LEN 1 // length of the FIFO channels
 #define MY_PLANTS_LEN ((N_PLANT_BEDS/N_SEEDERS)+(N_PLANT_BEDS%N_SEEDERS)) // upper-bound on how many plants can be assigned to a process
 
 
 /* TYPES */
 
 mtype = { TIME, HARVEST, SEED };
-typedef sensor_read {
-	byte age;
-	short temp;
-}
 
 /* GLOBAL VARIABLES */
 
-short       weather_temp_rate = 0;      // influence of the global weather to the temp of each plant
-bool        heaters[N_PLANT_BEDS];          // if the plant is actively receiving heat
-sensor_read plant_sensors[N_PLANT_BEDS];    // readings from the sensors of every plant
+short       weather_temp_rate = 0;          // influence of the global weather to the temp of each plant
+bool        heater;                         // if the planta are actively receiving heat
+short       temp = START_TEMP;
+byte        plant_sensors[N_PLANT_BEDS];    // readings from the sensors of every plant (age)
 byte        plant_harvesters[N_PLANT_BEDS]; // which harvester can harvest which plant bed
 byte        plant_seeders[N_PLANT_BEDS];    // which seeder can seed which plant bed
 byte        n_mature_harvested = 0;     // number of mature plants harvested
@@ -106,7 +104,7 @@ inline get_random(n, min, max)
 /**
  * Decides the growth rate of the plant given the current temperature.
  */
-inline get_growth_rate(rate, temp)
+inline get_growth_rate(rate)
 {
 	if
 	:: (temp <= FREEZING_TEMP) ->
@@ -128,8 +126,6 @@ inline get_growth_rate(rate, temp)
 proctype monitor(byte my_id)
 {
 	assert(RATE_EXPIRED > 0);
-	int avg_temp;
-	byte i;
 	do
 	:: atomic { 
 		clock[my_id] ? _;
@@ -140,20 +136,10 @@ proctype monitor(byte my_id)
 		:: else                                  -> has_expired = false;
 		fi;
 		
-// check_temperature:
-		/*
-		 * Get the average temperature between all plants
-		 *  use it to check bounds.
-		 */
-		i = 0;
-		do
-		:: (i < N_PLANT_BEDS) -> avg_temp = avg_temp + plant_sensors[i].temp; i++;
-		:: else -> break;
-		od;
-		avg_temp = avg_temp / N_PLANT_BEDS;
+// check_temperature:		
 		if
-		:: ((avg_temp > FREEZING_TEMP) && (avg_temp < BURNING_TEMP)) -> temp_in_bounds = true;
-		:: else                                                      -> temp_in_bounds = false;;
+		:: ((temp > FREEZING_TEMP) && (temp < BURNING_TEMP)) -> temp_in_bounds = true;
+		:: else                                              -> temp_in_bounds = false;;
 		fi;
 
 //check_rate_expired:	
@@ -169,6 +155,10 @@ proctype monitor(byte my_id)
 		if
 		:: (time_step <= TIME_LIMIT) -> timed_expired = has_expired;
 		:: else                      -> timed_expired = false;
+		fi;
+		if
+		:: (timed_expired) -> assert(false);
+		:: else -> skip;
 		fi;
 
 //check_timed_temp:
@@ -194,12 +184,12 @@ proctype monitor(byte my_id)
  */
 proctype global_clock()
 {
-	byte i = 0;
+	byte p = 0;
 	do
-	:: clock[i] ! TIME; 
+	:: clock[p] ! TIME; 
 		if
-		:: (i < (N_PROCESSES-1)) -> i++;
-		:: else                  -> i = 0; time_step++;
+		:: (p < (N_PROCESSES-1)) -> p++;
+		:: else                  -> p = 0; time_step++;
 		fi;
 	od;
 }
@@ -210,16 +200,17 @@ proctype global_clock()
  */
 proctype global_weather(byte my_id)
 {
-	byte length = 0; // of weather period
+	byte length = 0; // len of weather period
 
 	do
 	:: atomic {
 		clock[my_id] ? _;
 		if
-		:: length > 0 -> length--;
+		:: length > 0  -> length--;
 		:: length == 0 ->
 			get_random(length, WEATHER_MIN_LEN, WEATHER_MAX_LEN);
 			get_random(weather_temp_rate, WEATHER_MIN_RATE, WEATHER_MAX_RATE);
+		:: else -> assert(false);
 		fi;
 	}
 	od;
@@ -234,7 +225,6 @@ proctype plant_bed(byte my_id)
 {
 	byte  growth_rate;
 	byte  age = AGE_NO_PLANT;
-	short temp = START_TEMP;
 	if
 	:: (RANDOM_START) -> get_random(age, AGE_NO_PLANT, AGE_MATURE); // random starting age for plant bed
 	:: else           -> skip;
@@ -251,7 +241,7 @@ proctype plant_bed(byte my_id)
 			if 
 			:: ((age < AGE_EXPIRED)
 				&& (age != AGE_NO_PLANT))
-				-> get_growth_rate(growth_rate, temp);
+				-> get_growth_rate(growth_rate);
 				    age = age + growth_rate;
 					if
 					:: (age > AGE_EXPIRED) -> age = AGE_EXPIRED; 
@@ -260,26 +250,19 @@ proctype plant_bed(byte my_id)
 			:: else -> skip;
 			fi;
 
-//update_plant_temperature:
-			if
-			:: heaters[my_id] -> temp = temp + weather_temp_rate + TEMP_INCREASE;
-			:: else           -> temp = temp + weather_temp_rate;
-			fi;
-
 //update_plant_sensor:
-			plant_sensors[my_id].age = age;
-			plant_sensors[my_id].temp = temp;
+			plant_sensors[my_id] = age;
 
 //receive_action:
 			if
 			:: plant_action[my_id] ? HARVEST -> 
 					assert(age != AGE_NO_PLANT);
 					age = AGE_NO_PLANT;
-					plant_sensors[my_id].age = age;
+					plant_sensors[my_id] = age;
 			:: plant_action[my_id] ? SEED ->
 					assert(age == AGE_NO_PLANT);
 					age = AGE_PLANTED;
-					plant_sensors[my_id].age = age;
+					plant_sensors[my_id] = age;
 			:: empty(plant_action[my_id]) -> skip;
 			fi;
 		}
@@ -292,35 +275,24 @@ proctype plant_bed(byte my_id)
  */
 proctype heat_manager(byte my_id)
 {
-	byte i;
-	byte active_heaters = 0;
-	short temp;
+	assert( (MAX_SAFE_TEMP - HOT_PREEMPTIVE) > (MIN_SAFE_TEMP + COLD_PREEMPTIVE) );
 	do
 	:: atomic {
 		clock[my_id] ? _;
-		i=0;
-		do
-		:: (i < N_PLANT_BEDS) ->
-			temp = plant_sensors[i].temp;
-			if
-			:: (temp >= (MAX_SAFE_TEMP - HOT_PREEMPTIVE)) ->
-					if
-					:: (heaters[i]) -> active_heaters--;
-					:: else         -> skip;
-					fi;
-					heaters[i] = false;
-			:: (temp <= (MIN_SAFE_TEMP + COLD_PREEMPTIVE)) ->
-					if
-					:: !(heaters[i]) -> active_heaters++;
-					:: else          -> skip;
-					fi;
-					heaters[i] = true;	
-			:: else -> skip;
-			fi;
-			i++;
-		:: else -> break;
-		od;
-		assert(active_heaters <= N_PLANT_BEDS);
+//update_plant_temperature:
+		if
+		:: heater -> temp = temp + weather_temp_rate + TEMP_INCREASE;
+		:: else   -> temp = temp + weather_temp_rate;
+		fi;
+//manage_heater:
+		if
+		:: (temp >= (MAX_SAFE_TEMP - HOT_PREEMPTIVE)) ->
+				heater = false;
+		:: (temp <= (MIN_SAFE_TEMP + COLD_PREEMPTIVE)) ->
+				heater = true;	
+		:: else ->
+				skip;
+		fi;
 	}
 	od;
 }
@@ -376,8 +348,8 @@ proctype harvester(byte my_id)
 		do
 		:: ((i < MY_PLANTS_LEN) && (my_plants[i] != 255)) -> 
 			if
-			:: (plant_sensors[my_plants[i]].age > highest_age) -> 
-					best_plant = my_plants[i]; highest_age = plant_sensors[my_plants[i]].age;
+			:: (plant_sensors[my_plants[i]] > highest_age) -> 
+					best_plant = my_plants[i]; highest_age = plant_sensors[my_plants[i]];
 			:: else -> skip;
 			fi;
 			i++;
@@ -390,7 +362,7 @@ proctype harvester(byte my_id)
 			&& nfull(plant_action[best_plant])) -> 
 				plant_action[best_plant] ! HARVEST;
 				if
-				:: (plant_sensors[best_plant].age < AGE_EXPIRED) ->
+				:: (plant_sensors[best_plant] < AGE_EXPIRED) ->
 							n_mature_harvested++;
 				:: else  -> n_expired_harvested++;
 				fi;
@@ -445,12 +417,12 @@ proctype seeder(byte my_id)
 		do
 		:: ((i < MY_PLANTS_LEN) && (my_plants[i] != 255)) -> 
 			if
-			:: ((plant_sensors[my_plants[i]].age == AGE_NO_PLANT)
+			:: ((plant_sensors[my_plants[i]] == AGE_NO_PLANT)
 				&& nfull(plant_action[my_plants[i]])) -> 
 					plant_action[my_plants[i]] ! SEED;
 					n_planted++;
 					break; // one seed per time slot!
-			:: (!(plant_sensors[my_plants[i]].age == AGE_NO_PLANT)
+			:: (!(plant_sensors[my_plants[i]] == AGE_NO_PLANT)
 				|| full(plant_action[my_plants[i]])) -> skip;
 			fi;
 			i++;
