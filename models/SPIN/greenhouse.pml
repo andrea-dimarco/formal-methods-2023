@@ -1,93 +1,217 @@
 /* 
- * Automatic GreenHouse
- *  ...
+ * Automatic Greenhouse
  *  
+ * This model consists of a number of plant beds, a heater, harvester bots and seeder bots.
+ * There is a global time that forces everything to run in lockstep.
+ * Within each plant bed, one plant may be growing if the temperature is within a specific
+ * bound. Once the plant is mature, it can be harvested. Otherwise, it will expire due to
+ * old age after some more timesteps. The temperature is affected by global weather and
+ * a greenhouse heater that is activated when necessary.
+ * The harvesters and seeders are each responsible for a fixed set of plant beds and can
+ * do one action per timestep.
  */
 
-/* PROPERTIES */
+/** PROPERTIES **/
 
-ltl exp  { [] !(has_expired) } // the system harvests at most LIMIT_EXPIRED expired plants
-ltl temp { [] temp_in_bounds } // the average temperature never gets below FREEZING_TEMP or above BURNING_TEMP
-ltl rate { [] rate_expired }   // the system keeps a rate of 1 (or less) expired plant every RATE_EXPIRED mature plants harvested
+ltl exp  { [] !(has_expired) } // "the system harvests at most LIMIT_EXPIRED expired plants"
+ltl temp { [] temp_in_bounds } // "the average temperature never gets below FREEZING_TEMP or above BURNING_TEMP"
+ltl rate { [] rate_expired }   // "the system keeps a rate of 1 (or less) expired plant every RATE_EXPIRED mature plants harvested"
 
-ltl t_exp  { [] !(timed_expired) } // same as 'exp' but only for the first TIME_LIMIT time steps
-ltl t_temp { [] timed_temp }       // same as 'temp' but only for the first TIME_LIMIT time steps
-ltl t_rate { [] timed_rate }       // same as 'rate' but only for the first TIME_LIMIT time steps
+ltl t_exp  { [] !(timed_expired) } // same as 'exp' but only for the first TIME_LIMIT timesteps
+ltl t_temp { [] timed_temp }       // same as 'temp' but only for the first TIME_LIMIT timesteps
+ltl t_rate { [] timed_rate }       // same as 'rate' but only for the first TIME_LIMIT timesteps
+
+ltl fair_exp { ( ([]<> !(is_harshest_weather)) && ([]<> !(is_longest_weather)) ) -> ([] !(has_expired)) }
+ltl fair_temp { ( ([]<> !(is_harshest_weather)) && ([]<> !(is_longest_weather)) ) -> ([] temp_in_bounds)  }
+ltl fair_rate { ( ([]<> !(is_harshest_weather)) && ([]<> !(is_longest_weather)) ) -> ([] rate_expired)  }
 
 
-/* MACROS */
+/** MODEL PARAMETERS **/
 
-#define N_PLANT_BEDS  50    // number of plant beds
-#define N_HARVESTERS  20    // number of harvester robots
-#define N_SEEDERS     10    // number of robots that plant seeds
+/**
+ * Number of plant beds, harvesters and seeders. The harvesters and seeders are
+ * statically distributed fairly across the plant beds.
+ */
+#define N_PLANT_BEDS  1
+#define N_HARVESTERS  1
+#define N_SEEDERS     1
 
-#define RANDOM_START false // starting age for plant beds is randomized between [AGE_NO_PLANT, AGE_MATURE]
+/**
+ * Temperature thresholds for plant growth and death.
+ * 
+ * If the temperature is too low, the plant will freeze (and thus expire).
+ * If the temperature is too high, the plant will burn (and thus expire).
+ * Above the freezing threshold, the plant makes no growth progress.
+ * In the safe interval, it makes normal growth progress.
+ * Above the safe temperature range but below burning, the plant grows faster.
+ * See the get_growth_rate inline below.
+ */
+#define FREEZING_TEMP  0
+#define MIN_SAFE_TEMP 10
+#define MAX_SAFE_TEMP 15
+#define BURNING_TEMP  25
 
-#define TEMP_INCREASE 4   // Strength of the heater
+/**
+ * Starting greenhouse temperature.
+ */
+#define START_TEMP ((FREEZING_TEMP+BURNING_TEMP)/2)
 
-#define COLD_PREEMPTIVE 2 // the heater will be turned ON when temp is this close to safe limits
-#define HOT_PREEMPTIVE  1  // the heater will be turned OFF when ...
+/**
+ * Every timestep, a turned-on heater increases the temperature of all
+ * plant beds by this value.
+ */
+#define HEATING_RATE 4
 
-#define LIMIT_EXPIRED 0   // How many expired plants the system tolerates
-#define RATE_EXPIRED 10   // Tolerates 1 expired plant every 'RATE_EXPIRED' mature harvested plants
-#define TIME_LIMIT   50   // For how many time steps the system has to satisfy the properties
+/**
+ * Growth rate of plants depending on the temperature range.
+ * See get_growth_rate and the comment on temperatures above.
+ */
+#define COLD_RATE 0 // (FREEZING_TEMP, MIN_SAFE_TEMP) exclusive
+#define SAFE_RATE 1 // [MIN_SAFE_TEMP, MAX_SAFE_TEMP] inclusive
+#define HOT_RATE 2  // (MAX_SAFE_TEMP, BURNING_TEMP)  exclusive
 
-// Monitor, heat manager, global weather, plants, harvesters, and seeders.
+/**
+ * Plant age thresholds and no-plant marker.
+ *
+ * Every timestep, the plant age is updated according to the growth rate
+ * depending on the temperature. When the plant is mature, it can be harvested,
+ * but a while afterwards, it expires. This requires removal by the harvester
+ * too, but yields nothing. More broadly, age is used as a sort of plant bed
+ * status: there is a marker for when there is no seed planted in the bed,
+ * and AGE_EXPIRED also marks plants that froze or overheated.
+ */
+#define AGE_NO_PLANT 0
+#define AGE_PLANTED  1
+#define AGE_MATURE   5
+#define AGE_EXPIRED 10
+
+/**
+ * Weather duration and effect strength.
+ *
+ * Weather consists of periods of a random length between WEATHER_MIN_LEN
+ * and WEATHER_MAX_LEN. Each period has a temperature effect that is
+ * added to every plant bed's temperature every timestep. This effect is
+ * chosen between WEATHER_MIN_RATE and WEATHER_MAX_RATE and is constant
+ * throughout the period.
+ *
+ * At the moment, we only have cooling weather events, as the plant beds
+ * only have heaters and no coolers and we have no way to reasonably
+ * react to hot weather.
+ */
+#define WEATHER_MIN_LEN 1
+#define WEATHER_MAX_LEN 3
+#define WEATHER_MIN_RATE (-5)
+#define WEATHER_MAX_RATE 0
+
+/** CONTROL SYSTEM AND MONITORING PARAMETERS **/
+
+/**
+ * Heating system thresholds
+ *
+ * For the implementation, look at the heat_manager process.
+ */
+#define COLD_PREEMPTIVE 2 // The heater will be turned ON when temp is this close to safe limits.
+#define HOT_PREEMPTIVE  1 // The heater will be turned OFF when the temperature is this close to safe limits.
+
+/**
+ * Whether the starting age for the plants is randomized between between
+ * [AGE_NO_PLANT, AGE_MATURE]. Otherwise, every plant bed starts empty.
+ */
+#define RANDOM_START false
+
+/**
+ * Knobs for the monitor and properties
+ *
+ * The monitor process tracks a number of statistics and the properties we can model-check
+ * are effectively whether these statistics are within certain bounds.
+ */
+#define LIMIT_EXPIRED 0 // The number of expired plants the system tolerates before the 'exp' property is violated.
+#define RATE_EXPIRED 10 // For the 'rate' property that holds if there is at most one expired plant every 'RATE_EXPIRED' mature harvested plants.
+#define TIME_LIMIT   50 // The number of timesteps the system has to satisfy the timed properties (t_*).
+
+/** INTERNAL MACROS **/
+
+#define CHANNEL_LEN 1
+
+/**
+ * Upper bound on how many plants can be assigned to a harvester/seeder.
+ */
+#define HARVESTER_PLANTS_LEN ((N_PLANT_BEDS/N_HARVESTERS)+(N_PLANT_BEDS%N_HARVESTERS))
+#define SEEDER_PLANTS_LEN ((N_PLANT_BEDS/N_SEEDERS)+(N_PLANT_BEDS%N_SEEDERS))
+
+/**
+ * Time-affected processes.
+ *
+ * Monitor, heat manager, global weather, plants, harvesters, and seeders.
+ */
 #define N_PROCESSES (1 + 1 + 1 + N_PLANT_BEDS + N_HARVESTERS + N_SEEDERS)
 
-#define FREEZING_TEMP 0   // plant freezes to death
-#define MIN_SAFE_TEMP 10   // min temperature for the plants
-#define MAX_SAFE_TEMP 15  // max temperature for the plants
-#define BURNING_TEMP  25  // plant combust into flames
-#define START_TEMP ((FREEZING_TEMP+BURNING_TEMP)/2 ) // starting greenhouse temperature
-
-#define AGE_NO_PLANT 0    // when the plant bed has no plant
-#define AGE_PLANTED 1     // starting age for the plant
-#define AGE_MATURE 5      // from this age age the plant can be harvested
-#define AGE_EXPIRED 10    // from this age the plant can no longer be harvested
-
-#define COLD_RATE 0       // growth rate with cold temperatures
-#define SAFE_RATE 1       // growth rate with safe temperatures
-#define HOT_RATE 2        // growth rate with hot temperatures
-
-#define WEATHER_MIN_LEN 1     // minimum number of time steps of a weather period
-#define WEATHER_MAX_LEN 3     // maximum number of time steps of a weather period
-#define WEATHER_MIN_RATE (-5) // maximum temperature decrease
-#define WEATHER_MAX_RATE 0    // maximum temperature increase
-
-#define CHANNEL_LEN 1 // length of the FIFO channels
-#define HARVESTER_PLANTS_LEN ((N_PLANT_BEDS/N_HARVESTERS)+(N_PLANT_BEDS%N_HARVESTERS)) // upper-bound on how many plants can be assigned to a process
-#define SEEDER_PLANTS_LEN ((N_PLANT_BEDS/N_SEEDERS)+(N_PLANT_BEDS%N_SEEDERS)) // upper-bound on how many plants can be assigned to a process
-
-
-/* TYPES */
+/** MESSAGE TYPE **/
 
 mtype = { TIME, HARVEST, SEED };
 
-/* GLOBAL VARIABLES */
+/** GLOBAL VARIABLES **/
 
-short       weather_temp_rate = 0;          // influence of the global weather to the temp of each plant
-bool        heater;                         // if the planta are actively receiving heat
-short       temp = START_TEMP;
-byte        plant_sensors[N_PLANT_BEDS];    // readings from the sensors of every plant (age)
-byte        plant_harvesters[N_PLANT_BEDS]; // which harvester can harvest which plant bed
-byte        plant_seeders[N_PLANT_BEDS];    // which seeder can seed which plant bed
+/**
+ * Temperature and weather are global to all plant beds in the greenhouse,
+ * thus best represented as global variables.
+ */
+short       weather_temp_rate = 0; // See comment about the WEATHER_* parameters.
+byte        weather_length = 0;    // length of weather period
+bool        heater;                // Is the greenhouse heater turned on?
+short       temp = START_TEMP;     // Greenhouse temperature
+
+/**
+ * Age readings for each plants. Published every timestep by the plant bed processes.
+ * Harvesters and seeders look into this array to find which plants beds to act on.
+ */
+byte        plant_sensors[N_PLANT_BEDS];
+
+/**
+ * Mapping from plant bed to the harvester and seeder that is responsible for it.
+ * Statically distributed. The actual value stored is the process number assigned
+ * in the INIT section.
+ */
+byte        plant_harvesters[N_PLANT_BEDS];
+byte        plant_seeders[N_PLANT_BEDS];
+
+/**
+ * Statistics kept for and by the monitor in order to see which properties are fulfilled.
+ */
+int         time_step = 0;              // updated by global_clock
 byte        n_mature_harvested = 0;     // number of mature plants harvested
 byte        n_expired_harvested = 0;    // number of expired plants
 bool        has_expired = false;        // for the monitor
 bool        temp_in_bounds = true;      // for the monitor
 bool        rate_expired = true;        // for the monitor
-int         time_step = 0;              // updated by global_clock
 bool        timed_expired = false;
 bool        timed_temp = true;
 bool        timed_rate = true;
+bool        is_harshest_weather = false;
+bool        is_longest_weather = false;
 
-/* CHANNELS */
+/** CHANNELS **/
+
+/**
+ * Array of blocking channels, one for each time-affected process. The global clock
+ * sends a TIME message to each process in turn, blocking until it is received,
+ * i.e. the process has read the message. Because all processes read the message in
+ * an atomic block, this means the process has completely done its action once the
+ * global clock is unblocked again.
+ *
+ * The index of a process is called its ID. Because the IDs of harvesters and seeders
+ * are used in other arrays, the order of elements matters and is determined during
+ * initialisation (see below).
+ */
 chan clock[N_PROCESSES] = [0] of { mtype };
+
+/**
+ * Every plant bed may receive one HARVEST or SEED action per timestep by its
+ * responsible harvester or seeder.
+ */
 chan plant_action[N_PLANT_BEDS] = [CHANNEL_LEN] of { mtype };
 
-
-/* UTILITY */
+/** INLINES **/
 
 /**
  * Randomly chooses a number between min and max (inclusive).
@@ -121,8 +245,13 @@ inline get_growth_rate(rate)
 }
 
 
-/* PROCESSES */
+/** PROCESSES **/
 
+/**
+ * The monitor is a time-triggered process running at the end of each clock cycle
+ * and updates statistics about the system, checking if certain properties are fulfilled.
+ * These are exposed above as LTL properties.
+ */
 proctype monitor(byte my_id)
 {
 	assert(RATE_EXPIRED > 0);
@@ -178,15 +307,25 @@ proctype monitor(byte my_id)
 		:: (time_step <= TIME_LIMIT) -> timed_rate = rate_expired;
 		:: else                      -> timed_rate = true;
 		fi;
+
+//check_fairness:
+		if
+		:: (weather_temp_rate == WEATHER_MIN_RATE) -> is_harshest_weather = true;
+		:: else                                    -> is_harshest_weather = false;
+		fi;
+		if
+		:: (weather_length == WEATHER_MAX_LEN) -> is_longest_weather = true;
+		:: else                                -> is_longest_weather = false;
+		fi;
 	}
 	od;
 	
 }
 
 /**
- * The global clock sends time notifications to every process.
- * If a process has not performed its time-sensitive action yet,
- * the global clock process blocks. 
+ * The global clock cyclically sends time notifications to every process.
+ * As long as a process has not completed its time-triggered action yet,
+ * the global clock process blocks.
  */
 proctype global_clock()
 {
@@ -202,19 +341,18 @@ proctype global_clock()
 
 /**
  * The global weather influences the temperature of all plants uniformily,
- *  has a longer but random duration during which the rate stays constant.
+ * and has a random duration during which this weather effect stays constant.
+ * See the comment on the WEATHER_* parameters.
  */
 proctype global_weather(byte my_id)
 {
-	byte length = 0; // len of weather period
-
 	do
 	:: atomic {
 		clock[my_id] ? _;
 		if
-		:: length > 0  -> length--;
-		:: length == 0 ->
-			get_random(length, WEATHER_MIN_LEN, WEATHER_MAX_LEN);
+		:: weather_length > 0  -> weather_length--;
+		:: weather_length == 0 ->
+			get_random(weather_length, WEATHER_MIN_LEN, WEATHER_MAX_LEN);
 			get_random(weather_temp_rate, WEATHER_MIN_RATE, WEATHER_MAX_RATE);
 		:: else -> assert(false);
 		fi;
@@ -223,9 +361,10 @@ proctype global_weather(byte my_id)
 }
 
 /**
- * Plant beds may contain a plant that grows if the temperature is
- *  in the right range, and report their plant's status as well as
- *  update their state according to the harvesters and seeders.
+ * Plant beds are either empty or contain a plant that grows if the 
+ * temperature is in the right range. They report the plant status
+ * and update their state in response to plant_action messages by
+ * harvesters and seeders.
  */
 proctype plant_bed(byte my_id)
 {
@@ -241,8 +380,8 @@ proctype plant_bed(byte my_id)
 		clock[my_id] ? _;
 //update_plant_age:
 			/* 
-			 * Only grow the plant if it's not expired
-			 *  If it's too cold/hot it directly expires
+			 * Only grow the plant if it's not expired.
+			 * If it's too cold/hot it directly expires.
 			 */
 			if 
 			:: ((age < AGE_EXPIRED)
@@ -276,18 +415,17 @@ proctype plant_bed(byte my_id)
 }
 
 /**
- * The heat manager decides whether each heater should be on or off
- *  by looking at the individual plant's status.
+ * The heat manager decides whether the heater should be on or off.
  */
 proctype heat_manager(byte my_id)
 {
-	assert( (MAX_SAFE_TEMP - HOT_PREEMPTIVE) > (MIN_SAFE_TEMP + COLD_PREEMPTIVE) );
+	assert((MAX_SAFE_TEMP - HOT_PREEMPTIVE) > (MIN_SAFE_TEMP + COLD_PREEMPTIVE));
 	do
 	:: atomic {
 		clock[my_id] ? _;
 //update_plant_temperature:
 		if
-		:: heater -> temp = temp + weather_temp_rate + TEMP_INCREASE;
+		:: heater -> temp = temp + weather_temp_rate + HEATING_RATE;
 		:: else   -> temp = temp + weather_temp_rate;
 		fi;
 //manage_heater:
@@ -317,9 +455,9 @@ proctype harvester(byte my_id)
 
 //get_my_plants:
 	/*
-	 * Every plant has an harvester assigned by index,
-	 *  here we save the indexes of the plants assigned to this harvester
-	 *  inside the my_plants array.
+	 * Every plant bed has an harvester assigned based on its index.
+	 * Save the indices of the plants beds assigned to this
+	 * harvester inside the my_plants array.
 	 */
 	atomic {
 		i = 0; j = 0;
@@ -333,9 +471,9 @@ proctype harvester(byte my_id)
 		:: else -> break;
 		od;
 		/*
-		 * Empty slots are assigned 255 because the type of indexes is byte
-		 *  since we cannot have more than 255 processes and we need
-		 *  at least 1 plant and 1 harvester, no plant will have id=255
+		 * Empty slots are assigned 255 because the type of indices is byte.
+		 * Since we cannot have more than 255 processes and we need
+		 * at least one plant bed and one harvester, no plant will have ID 255.
 		 */
 		do
 		:: (j < HARVESTER_PLANTS_LEN) -> my_plants[j] = 255; j++;
@@ -348,7 +486,7 @@ proctype harvester(byte my_id)
 		clock[my_id] ? _;
 //check_plants:
 		/*
-		 * The harvesting policy is the highest age heuristic
+		 * Harvesting policy: choose oldest mature plant.
 		 */
 		best_plant = 0; i = 0; highest_age = AGE_NO_PLANT;
 		do
@@ -381,7 +519,8 @@ proctype harvester(byte my_id)
 
 
 /**
- * Seeder processes finds empty plant beds and put new seeds in them.
+ * Seeder processes find empty plant beds and put new seeds in them.
+ * They are dual to harvesters and as such are mostly a copy, implementation-wise.
  */
 proctype seeder(byte my_id)
 {
@@ -391,8 +530,7 @@ proctype seeder(byte my_id)
 
 //get_my_plants:
 	/*
-	 * Every plant has a seeder assigned by index,
-	 *  analogous to the harvester get_my_plants state
+	 * Every plant has a seeder assigned by index, analogously to the harvester.
 	 */
 	atomic {
 		i = 0; j = 0;
@@ -415,8 +553,8 @@ proctype seeder(byte my_id)
 	do
 	:: atomic {
 		/*
-		 * Finds the first plant bed with no plant and just
-		 *  plants a seed. Can only plant one seed per time slot.
+		 * Seeding policy: Find the first plant bed with no plant an
+		 * plant a seed. Can only plant one seed per time slot.
 		 */
 		clock[my_id] ? _;
 		i = 0;
@@ -437,10 +575,10 @@ proctype seeder(byte my_id)
 	od;
 }
 
+/** INIT **/
 
-/* INIT */
 init {
-	byte i = 0;
+	byte i = 0; // process ID used in clock[] array
 	byte j = 0;
 	byte k = 0; // number of plants assigned to each module
 	byte p = 0;
@@ -457,7 +595,9 @@ init {
 		run heat_manager(i); i++;
 
 //assign_plants_to_harvesters:
-		// Equally distribute the plants between harvesters
+		/*
+		 * Equally distribute the plants between harvesters.
+		 */
 		j = i; p = 0;
 		k = N_PLANT_BEDS / N_HARVESTERS;
 		do
@@ -472,7 +612,9 @@ init {
 				j++;
 		:: else -> break;
 		od;
-		// assign all remaining plants to the last harvester
+		/*
+		 * Assign all remaining plants to the last harvester.
+		 */
 		j = (N_PROCESSES - N_SEEDERS - 1 - 1) - 1; // last harvester id
 		do
 		:: (p < N_PLANT_BEDS) ->
@@ -488,7 +630,9 @@ init {
 		od;
 
 //assign_plants_to_seeders:
-		// Equally distribute the plants between seeders
+		/*
+		 * Equally distribute the plants between seeders.
+		 */
 		j = i; p = 0;
 		k = N_PLANT_BEDS / N_SEEDERS;
 		do
@@ -503,7 +647,9 @@ init {
 				j++;
 		:: else -> break;
 		od;
-		// assign all remaining plants to the last seeder
+		/*
+		 * Assign all remaining plants to the last seeder.
+		 */
 		j = (N_PROCESSES - 1 - 1) - 1; // last seeder id
 		do
 		:: (p < N_PLANT_BEDS) ->
